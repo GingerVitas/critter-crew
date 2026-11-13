@@ -1,0 +1,7 @@
+{
+  "name": "critter-crew",
+  "version": "0.1.0",
+  "description": "A sidebar where every subagent hatches as an animated critter that works, naps, celebrates or faints with its status.",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

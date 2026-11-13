@@ -1,0 +1,6 @@
+{
+  "name": "critter-crew",
+  "owner": { "name": "GingerVitas" },
+  "description": "Critter Crew: subagents as animated critters in the Claude Code sidebar.",
+  "plugins": [{ "name": "critter-crew", "source": "./" }]
+}
