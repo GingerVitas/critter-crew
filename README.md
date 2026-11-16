@@ -4,7 +4,7 @@ A Claude Code mod that turns your subagents into animated critters in the sideba
 
 **Critter Crew** gives Claude Code a sidebar pane where every subagent hatches as its own little creature. Each critter gets a name and color, and a species based on its agent type: Explore subagents are frogs, Plan subagents are owls, and general-purpose ones are blobs. It shows its status through animation: bouncing while it works, snoozing while it waits, throwing confetti when it finishes, and wearing a halo if it fails or is stopped.
 
-Each card shows the subagent's task, its model (with a badge for Opus, Sonnet, Haiku or Fable), the number of tools it has used, the tool it last used, and how long it has been running. Click **peek ›** to open that subagent's transcript, and clear finished critters with one button.
+Each card shows the subagent's task, its model (with a badge for Opus, Sonnet, Haiku or Fable), the number of tools it has used, the tool it last used, and how long it has been running. Click **tools ▾** on a card to see each tool call it made (what it touched, whether it worked, how long it took); in the terminal, **peek ›** opens its transcript. Clear finished critters with one button.
 
 It works in the Claude Code desktop app, VS Code, mobile and the terminal, where the critters appear as text faces. It also follows light and dark mode.
 

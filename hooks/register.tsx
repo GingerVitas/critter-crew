@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, EngineInterface, Register } from 'claude-code'
 
-import type { Critter, Species } from '../types'
+import type { Critter, Species, ToolCallLog } from '../types'
 
 const PANE = 'critter-crew'
 const TITLE = 'Critter Crew'
@@ -12,6 +12,40 @@ const crew = atom({ plugin: 'critter-crew', key: 'crew' } as const, [], {
 const clockNow = atom({ plugin: 'critter-crew', key: 'now' } as const, 0)
 /** Agent id → the model it was started on, as `agent.spawn` resolved it. */
 const models = atom({ plugin: 'critter-crew', key: 'models' } as const, {})
+/** Agent id → its recent tool calls, oldest first. */
+const calls = atom({ plugin: 'critter-crew', key: 'calls' } as const, {}, { shape: 'calls-1' })
+/** The critters whose tool log is unfolded. */
+const opened = atom({ plugin: 'critter-crew', key: 'opened' } as const, [])
+
+const MAX_LOG = 40
+const SHOWN_LOG = 12
+
+const CALL_LOOK: Record<ToolCallLog['status'], { glyph: string; color: 'claude' | 'success' | 'error' | 'warning' }> = {
+  running: { glyph: '◌', color: 'claude' },
+  ok: { glyph: '✓', color: 'success' },
+  error: { glyph: '✗', color: 'error' },
+  denied: { glyph: '⊘', color: 'warning' },
+}
+
+/** `Read 4 · Grep 2 · Bash 1`, busiest first, at most four tools. */
+function toolTally(log: ToolCallLog[]): string {
+  const counts = new Map<string, number>()
+  for (const call of log) counts.set(call.tool, (counts.get(call.tool) ?? 0) + 1)
+  const top = [...counts].sort((a, b) => b[1] - a[1])
+  const shown = top.slice(0, 4).map(([tool, n]) => `${shortTool(tool)} ${n}`)
+  if (top.length > 4) shown.push(`+${top.length - 4} more`)
+  return shown.join(' · ')
+}
+
+/** `mcp__github__create_issue` → `github·create_issue`. */
+function shortTool(tool: string): string {
+  const m = /^mcp__(.+?)__(.+)$/.exec(tool)
+  return m ? `${m[1]!.slice(0, 12)}·${m[2]}` : tool
+}
+
+function fmtMs(ms: number): string {
+  return ms < 1000 ? `${Math.max(0, Math.round(ms))}ms` : elapsed(ms)
+}
 
 // ── Who hatches ─────────────────────────────────────────────────────────────
 
@@ -105,6 +139,38 @@ async function refresh($: EngineInterface): Promise<void> {
     await update($, crew, old => merge(old, list, now))
   }
   if (next.some(c => !ENDED.has(c.status))) await update($, clockNow, () => now)
+}
+
+/** The few words that say what a call was about: a file, a pattern, a command. */
+function callDetail(e: object): string {
+  const input = e as Record<string, unknown>
+  const pick = (k: string) => (typeof input[k] === 'string' ? (input[k] as string) : undefined)
+  const path = pick('file_path') ?? pick('notebook_path') ?? pick('path')
+  const short = (s: string, n = 60) => {
+    const one = s.split(/\r?\n/)[0]!.trim()
+    return one.length > n ? `${one.slice(0, n - 1)}…` : one
+  }
+  if (path) return short(path.split(/[\\/]/).slice(-2).join('/'))
+  const text = pick('command') ?? pick('pattern') ?? pick('query') ?? pick('url') ??
+    pick('description') ?? pick('skill') ?? pick('prompt')
+  return text ? short(text) : ''
+}
+
+async function logCall($: EngineInterface, agentId: string, entry: ToolCallLog): Promise<void> {
+  await update($, calls, all => ({ ...all, [agentId]: [...(all[agentId] ?? []), entry].slice(-MAX_LOG) }))
+}
+
+async function settleCall(
+  $: EngineInterface,
+  agentId: string,
+  id: string,
+  status: ToolCallLog['status'],
+): Promise<void> {
+  const now = await $.clock.now()
+  await update($, calls, all => ({
+    ...all,
+    [agentId]: (all[agentId] ?? []).map(c => (c.id === id ? { ...c, status, ms: now - c.at } : c)),
+  }))
 }
 
 async function bump($: EngineInterface, agentId: string, tool: string): Promise<void> {
@@ -370,9 +436,25 @@ export const register: Register = on => {
   })
 
   on('tool.call', async ($, e, next) => {
-    if (e.agentId !== undefined) await bump($, e.agentId, String(e.tool)).catch(() => undefined)
+    const agentId = e.agentId
+    if (agentId === undefined) return next(e)
 
-    return next(e)
+    const id = e.tool_use_id ?? `${String(e.tool)}-${Math.random().toString(36).slice(2)}`
+    await bump($, agentId, String(e.tool)).catch(() => undefined)
+    const at = await $.clock.now().catch(() => 0)
+    await logCall($, agentId, {
+      id,
+      tool: String(e.tool),
+      detail: callDetail(e),
+      status: 'running',
+      at,
+    }).catch(() => undefined)
+
+    const ran = await next(e)
+    const status: ToolCallLog['status'] = ran.deny ? 'denied' : ran.isError ? 'error' : 'ok'
+    await settleCall($, agentId, id, status).catch(() => undefined)
+
+    return ran
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -382,6 +464,9 @@ export const register: Register = on => {
     const list = await read($, crew)
     const now = await read($, clockNow)
     const modelOf = await read($, models)
+    const callsOf = await read($, calls)
+    const openIds = new Set(await read($, opened))
+    const canView = e.surface === 'terminal'
     const frame = Math.floor(now / 1000)
 
     const order = (c: Critter) => (c.status === 'running' ? 0 : NAPPING.has(c.status) ? 1 : 2)
@@ -392,16 +477,20 @@ export const register: Register = on => {
     const oops = list.filter(c => c.status === 'failed' || c.status === 'killed').length
     const toolsTotal = list.reduce((n, c) => n + c.tools, 0)
 
-    const peek = async (c: Critter) => {
+    const toggle = (c: Critter) =>
+      update($, opened, ids => (ids.includes(c.id) ? ids.filter(id => id !== c.id) : [...ids, c.id]))
+    const transcript = async (c: Critter) => {
       const r = await $.ui.view({ agentId: c.id })
-      if (r && 'deny' in r && r.deny) $.ui.toast(`${c.name} is shy right now (${r.deny}).`)
+      if (r && 'deny' in r && r.deny) $.ui.toast(`Can't open ${c.name}'s transcript here (${r.deny}).`)
     }
     const shoo = async () => {
       const gone = new Set(list.filter(c => ENDED.has(c.status)).map(c => c.id))
+      const keep = <T,>(all: Record<string, T>) =>
+        Object.fromEntries(Object.entries(all).filter(([id]) => !gone.has(id)))
       await update($, crew, all => all.filter(c => !ENDED.has(c.status)))
-      await update($, models, all =>
-        Object.fromEntries(Object.entries(all).filter(([id]) => !gone.has(id))),
-      )
+      await update($, models, keep)
+      await update($, calls, keep)
+      await update($, opened, ids => ids.filter(id => !gone.has(id)))
     }
 
     const summary = [
@@ -438,17 +527,20 @@ export const register: Register = on => {
               const isEnded = ENDED.has(c.status)
               const modelId = modelOf[c.id]
               const badge = modelId ? modelBadge(modelId) : undefined
+              const log = callsOf[c.id] ?? []
+              const isOpen = openIds.has(c.id)
+              const tally = toolTally(log)
               return (
                 <Box
                   key={`card-${c.id}`}
-                  flexDirection="row"
-                  gap="sm"
-                  alignItems="center"
+                  flexDirection="column"
+                  gap="xs"
                   borderStyle="round"
                   borderColor={c.status === 'running' ? accent : m.theme}
                   borderDimColor={isEnded}
                   paddingX={1}
                 >
+                <Box flexDirection="row" gap="sm" alignItems="center">
                   {Svg ? (
                     <Svg source={critterSvg(c, badge)} alt={`${c.name} the ${c.species}, ${m.label}${badge ? `, on ${badge.label}` : ''}`} width={56} height={56} isInteractive />
                   ) : (
@@ -474,10 +566,43 @@ export const register: Register = on => {
                     {c.status === 'running' && c.lastTool && (
                       <Text size="footnote" color="suggestion">↳ fiddling with {c.lastTool}</Text>
                     )}
+                    {tally && <Text size="footnote" dimColor>🧰 {tally}</Text>}
                   </Box>
-                  <Button key={`peek-${c.id}`} plain onPress={() => peek(c)}>
-                    <Text dimColor>peek ›</Text>
-                  </Button>
+                  <Box flexDirection="column" alignItems="flex-end">
+                    <Button key={`tools-${c.id}`} plain onPress={() => toggle(c)}>
+                      <Text dimColor>{isOpen ? 'tools ▴' : 'tools ▾'}</Text>
+                    </Button>
+                    {canView && (
+                      <Button key={`peek-${c.id}`} plain onPress={() => transcript(c)}>
+                        <Text dimColor>peek ›</Text>
+                      </Button>
+                    )}
+                  </Box>
+                </Box>
+                {isOpen && (
+                  <Box flexDirection="column" paddingLeft={1}>
+                    {log.length === 0 ? (
+                      <Text size="footnote" dimColor>No tool calls seen yet.</Text>
+                    ) : (
+                      [...log].reverse().slice(0, SHOWN_LOG).map(call => {
+                        const s = CALL_LOOK[call.status]
+                        return (
+                          <Text size="footnote">
+                            <Text color={s.color}>{s.glyph}</Text>
+                            <Text weight="semibold"> {call.tool}</Text>
+                            {call.detail ? <Text dimColor> {call.detail}</Text> : ''}
+                            <Text dimColor tabular>
+                              {'  '}{call.status === 'running' ? `${elapsed((now || call.at) - call.at)}…` : call.ms !== undefined ? fmtMs(call.ms) : ''}
+                            </Text>
+                          </Text>
+                        )
+                      })
+                    )}
+                    {log.length > SHOWN_LOG && (
+                      <Text size="footnote" dimColor>+{log.length - SHOWN_LOG} earlier</Text>
+                    )}
+                  </Box>
+                )}
                 </Box>
               )
             })}

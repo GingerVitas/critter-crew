@@ -38,7 +38,7 @@ test('a subagent hatches as a critter and counts its tools', async ($, on) => {
     fork: false,
   })
   await $.tool.call({ tool: 'Grep', pattern: 'x', agentId: 'a1' })
-  await $.tool.call({ tool: 'Read', file_path: '/a', agentId: 'a1' })
+  await $.tool.call({ tool: 'Read', file_path: '/repo/src/auth/login.ts', agentId: 'a1' })
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -46,6 +46,17 @@ test('a subagent hatches as a critter and counts its tools', async ($, on) => {
     expect(await ui.find({ type: 'Text', text: /2 tools/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /fiddling with Read/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /♛ Opus 5\.5 · 1M/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /Grep 1 · Read 1|Read 1 · Grep 1/ })).toBeTruthy()
+
+    // Unfolding the tool log lists each call with what it touched.
+    await ui.press({ key: 'tools-a1' })
+    expect(await ui.find({ type: 'Text', text: /✓ Read auth\/login\.ts/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /✓ Grep x/ })).toBeTruthy()
+    await ui.press({ key: 'tools-a1' })
+    expect(await ui.find({ type: 'Text', text: /✓ Read auth\/login\.ts/ })).toBeFalsy()
+
+    // Only the terminal has a main view to open a transcript in.
+    expect(Boolean(await ui.find({ type: 'Button', key: 'peek-a1' }))).toBe(surface === 'terminal')
     await ui.unmount()
   }
 })

@@ -14,8 +14,23 @@ export type Critter = {
   endedAt?: number
 }
 
+export type ToolCallLog = {
+  id: string
+  tool: string
+  detail: string
+  status: 'running' | 'ok' | 'error' | 'denied'
+  at: number
+  ms?: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'critter-crew': { crew: Shaped<Critter[]>; now: number; models: Record<string, string> }
+    'critter-crew': {
+      crew: Shaped<Critter[]>
+      now: number
+      models: Record<string, string>
+      calls: Shaped<Record<string, ToolCallLog[]>>
+      opened: string[]
+    }
   }
 }
